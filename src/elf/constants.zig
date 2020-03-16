@@ -12,6 +12,14 @@ pub const ElfClass = enum (u8) {
             else => unreachable,
         };
     }
+
+    pub fn alignment(self: ElfClass) type {
+        return switch (self) {
+            .Elf32 => 4,
+            .Elf64 => 8,
+            else => unreachable,
+        };
+    }
 };
 
 pub const ElfEndian = enum (u8) {
@@ -73,8 +81,6 @@ pub const ElfMachine = enum (u16) {
 };
 
 pub const ElfPhType = enum (u32) {
-    const lo_os   = 0x6000_0000;
-    const hi_os   = 0x6FFF_FFFF;
     const lo_proc = 0x7000_0000;
     const hi_proc = 0x7FFF_FFFF;
 
@@ -108,8 +114,10 @@ pub const PF = struct {
 
 pub const ElfShType = enum (u32) {
     ///  Start OS-specific.
-    pub const lo_os = 0x6000_0000;
-    pub const hi_os = 0xFFFF_FFFF;
+    const lo_proc = 0x7000_0000;
+    const hi_proc = 0x7FFF_FFFF;
+    const lo_user = 0x8000_0000;
+    const hi_user = 0xfFFF_FFFF;
 
     /// Section header table entry unused
     Null = 0x0,

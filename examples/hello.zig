@@ -4,13 +4,13 @@ const builtin = @import("builtin");
 const warn = std.debug.warn;
 const assert = std.debug.assert;
 
-const elf = @import("elf/file.zig");
+const elf = @import("elf");
 
 const ElfFile = elf.ElfFile;
 const Segment = elf.Segment;
 const Section = elf.Section;
 
-const PF = elf.PF;
+const PF = elf.constants.PF;
 
 /// little-endian byte n
 fn leByte(x: var, n: u8) u8 {
@@ -22,7 +22,7 @@ pub fn main() anyerror!void {
     // msg length
     const msg_len = 0xc;
     const page_alignment = 0x1000; // 4KiB pages
-    const base_addr = 0x10078;
+    const base_addr = 0x0001_0078;
     const entry_address = base_addr + msg_len;
 
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);

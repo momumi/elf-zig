@@ -2,6 +2,8 @@ const std = @import("std");
 
 usingnamespace(@import("constants.zig"));
 
+pub const symtab = @import("headers/symbol_table.zig");
+
 pub const ElfHeader32 = ElfHeader(.Elf32);
 pub const ElfHeader64 = ElfHeader(.Elf64);
 
@@ -93,9 +95,6 @@ pub fn ElfSectionHeader(elf_class: ElfClass) type {
             .Elf32 => 0x28, // 40
             .Elf64 => 0x40, // 64
             else => unreachable,
-        };
-
-        pub const Flags = struct {
         };
 
         name: u32,
