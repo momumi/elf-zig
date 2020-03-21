@@ -34,15 +34,15 @@ pub fn build(b: *Builder) void {
         exe.addPackagePath("elf", "src/elf.zig");
 
         const run_cmd = exe.run();
-        run_cmd.step.dependOn(b.getInstallStep());
+        // run_cmd.step.dependOn(b.getInstallStep());
 
         const run_step = b.step("example-hello", "Build and run the hello example");
         run_step.dependOn(&run_cmd.step);
     }
 
-    // example-hello-section
+    // example-sections
     {
-        const exe = b.addExecutable("example-hello-section", "examples/hello-section.zig");
+        const exe = b.addExecutable("example-section", "examples/section.zig");
         exe.setTarget(target);
         exe.setBuildMode(mode);
         exe.install();
@@ -50,9 +50,9 @@ pub fn build(b: *Builder) void {
         exe.addPackagePath("elf", "src/elf.zig");
 
         const run_cmd = exe.run();
-        run_cmd.step.dependOn(b.getInstallStep());
+        // run_cmd.step.dependOn(b.getInstallStep());
 
-        const run_step = b.step("example-hello-section", "Build and run the hello example");
+        const run_step = b.step("example-section", "Build and run the hello example");
         run_step.dependOn(&run_cmd.step);
 
         const run_step_default = b.step("run", "Build and run the hello example");

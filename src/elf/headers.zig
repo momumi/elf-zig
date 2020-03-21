@@ -110,6 +110,36 @@ pub fn ElfSectionHeader(elf_class: ElfClass) type {
     };
 }
 
+fn ElfRelaCommon(elf_class: ElfClass, addend: bool) type {
+    return struct {
+        pub const AddressType = elf_class.AddressType();
+        const _addend_size = if (addend) elf_class.wordSize() else 0;
+        pub const entry_size = switch (elf_class) {
+            .Elf32 => 8 + _addend_size,
+            .Elf64 => 16 + _addend_size,
+            else => unreachable,
+        };
+
+        offset: AddressType,
+        info: AddressType,
+        addend: if (addend) AddressType else void,
+        // #define ELF32_R_SYM(i)   ((i)>>8)
+        // #define ELF32_R_TYPE(i)   ((unsigned char)(i))
+
+        // #define ELF64_R_SYM(i)    ((i)>>32)
+        // #define ELF64_R_TYPE(i)   ((i)&0xffffffffL)
+    };
+}
+
+pub fn ElfRel(elf_class: ElfClass) type {
+    return ElfRelaCommon(elf_class, false);
+}
+
+pub fn ElfRela(elf_class: ElfClass) type {
+    return ElfRelaCommon(elf_class, true);
+}
+
+
 test "ELF" {
     const elf32 = ElfHeader32 {
         .endian = .Little,

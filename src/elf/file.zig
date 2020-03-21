@@ -3,9 +3,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 
 usingnamespace(@import("constants.zig"));
-pub const headers = @import("headers.zig");
-
-const symtab = headers.symtab;
+const headers = @import("headers.zig");
+// const relocation = @import("relocation.zig");
 
 const ArrayList = std.ArrayList;
 
@@ -15,6 +14,12 @@ const ArrayList = std.ArrayList;
 const ElfHeader = headers.ElfHeader;
 const ElfProgramHeader = headers.ElfProgramHeader;
 const ElfSectionHeader = headers.ElfSectionHeader;
+
+const ShIndex = u32;
+const PhIndex = u32;
+const SymIndex = u32;
+const RelIndex = u32;
+const StrIndex = u32;
 
 pub fn Segment(elf_class: ElfClass) type {
     return struct {
@@ -32,37 +37,204 @@ pub fn Segment(elf_class: ElfClass) type {
     };
 }
 
+pub const SectionDataTypeTag = enum {
+    None,
+    SegmentIndex,
+    Data,
+    StringTable,
+    SymbolTable,
+    RelaTable,
+};
+
+pub fn SectionData(elf_class: ElfClass) type {
+    return union(SectionDataTypeTag) {
+        None: void,
+        SegmentIndex: u32,
+        Data: []const u8,
+        StringTable: *const StringTable,
+        SymbolTable: *const SymbolTable(elf_class),
+        RelaTable: *const RelaTable(elf_class),
+    };
+}
+
 pub fn Section(elf_class: ElfClass) type {
     return struct {
         const AddressType = elf_class.AddressType();
+        const SectionDataType = SectionData(elf_class);
 
-        name: [:0]const u8,
+        name: StrIndex,
         sh_type: ElfShType,
         flags: AddressType,
-        segment_index: u32,
         addr: AddressType,
         link: u32,
         info: u32,
-        size: AddressType,
         alignment: AddressType,
+        entsize: AddressType,
 
-        _name_offset: u32 = 0,
+        data: SectionDataType,
+        // section_data =
+        // segment_index: u32 = PN_XNUM,
+
+        _data_offset: AddressType = 0,
+        _data_size: AddressType = 0,
+
+        pub fn getDataSize(self: @This()) AddressType {
+            return switch (self.data) {
+                .None, .SegmentIndex => 0,
+                .Data => |data| data.len,
+                .StringTable => |table| table.size(),
+                .SymbolTable => |table| table.size(),
+                .RelaTable => |table| table.size(),
+            };
+        }
     };
 }
+
+pub const StringTable = struct {
+    data: ArrayList(u8),
+    _offset: u64 = 0,
+
+    pub fn init(alloc: *std.mem.Allocator) !StringTable {
+        var result = StringTable {
+            .data = ArrayList(u8).init(alloc),
+        };
+
+        try result.data.append('\x00');
+
+        return result;
+    }
+
+    pub fn size(self: StringTable) usize {
+        return self.data.len;
+    }
+
+    pub fn asSlice(self: StringTable) []const u8 {
+        return self.data.span();
+    }
+
+    pub fn addString(self: *StringTable, string: []const u8) !StrIndex {
+        var string_index = self.data.len;
+        try self.data.appendSlice(string);
+        try self.data.append('\x00');
+        return @intCast(u32, string_index);
+    }
+
+    pub fn getString(self: StringTable, str_index: StrIndex) []const u8 {
+        const span = self.data.span();
+        const span_len = self.data.len;
+        var str_len: u32 = 0;
+        for (span[str_index..span_len]) |c| {
+            if (c == '\x00') {
+                break;
+            }
+            str_len += 1;
+        }
+        return span[str_index .. str_index+str_len];
+    }
+};
 
 pub fn Symbol(elf_class: ElfClass) type {
     return struct {
         const AddressType = elf_class.AddressType();
 
-        name: [:0]const u8,
+        name: StrIndex,
         value: AddressType,
         size: AddressType,
-        type_: symtab.STT,
-        bind: symtab.STB,
-        visbility: symtab.STV,
-        shndx: u16,
+        type_: headers.symtab.STT,
+        bind: headers.symtab.STB,
+        visbility: headers.symtab.STV,
+        shndx: u32,
+    };
+}
 
-        _name_offset: u32 = 0,
+pub fn SymbolTable(elf_class: ElfClass) type {
+    return struct {
+        const AddressType = elf_class.AddressType();
+        const SymbolType = Symbol(elf_class);
+        const ElfSymbolTableEntry = headers.symtab.ElfSymbolTableEntry(elf_class);
+        const entry_size = ElfSymbolTableEntry.entry_size;
+
+        symbol_entries: ArrayList(ElfSymbolTableEntry),
+
+        _highest_local: u32 = 0,
+
+        pub fn init(alloc: *std.mem.Allocator) !@This() {
+            var result = @This() {
+                .symbol_entries = ArrayList(ElfSymbolTableEntry).init(alloc),
+            };
+
+            // symtab entry at index 0
+            const index0_symtab = SymbolType {
+                .name = 0,
+                .value = 0,
+                .size = 0,
+                .type_ = .NoType,
+                .bind = .Local,
+                .visbility = .Default,
+                .shndx = 0,
+            };
+            _ = try result.addSymbol(index0_symtab);
+
+            return result;
+        }
+
+        pub fn size(self: @This()) AddressType {
+            return self.symbol_entries.len * @This().entry_size;
+        }
+
+        /// add a segment and return its index into the symbol table
+        pub fn addSymbol(self: *@This(), symbol: SymbolType) !SymIndex {
+
+            const entry = headers.symtab.ElfSymbolTableEntry(elf_class) {
+                .name = symbol.name,
+                .value = symbol.value,
+                .size = symbol.size,
+                .info = headers.symtab.stInfo(symbol.type_, symbol.bind),
+                // visbility: symtab.STV, // TODO
+                .other = 0,
+                // TODO: this value needs special handling to use u32 values
+                // need to add a SHT_SYMTAB_SHNDX section to store the extended
+                // indices
+                .shndx = @intCast(u16, symbol.shndx),
+            };
+
+            try self.symbol_entries.append(entry);
+
+            const index = @intCast(SymIndex, self.symbol_entries.len-1);
+
+            if (symbol.bind == .Local) {
+                self._highest_local = index;
+            }
+
+            return index;
+        }
+    };
+}
+
+pub fn RelaTable(elf_class: ElfClass) type {
+    return struct {
+        const AddressType = elf_class.AddressType();
+        const RelocationEntryType = headers.ElfRela(elf_class);
+        const entry_size = RelocationEntryType.entry_size;
+
+        rel_list: ArrayList(RelocationEntryType),
+
+        pub fn init(alloc: *std.mem.Allocator) !@This() {
+            var result = @This() {
+                .rel_list = ArrayList(RelocationEntryType).init(alloc),
+            };
+
+            return result;
+        }
+
+        pub fn size(self: @This()) AddressType {
+            return self.rel_list.len * @This().entry_size;
+        }
+
+        pub fn addRelocation(self: *@This(), relocation: RelocationEntryType) !RelIndex {
+            try self.rel_list.append(relocation);
+            return @intCast(RelIndex, self.rel_list.len-1);
+        }
     };
 }
 
@@ -71,15 +243,13 @@ pub fn ElfFile(elf_class: ElfClass) type {
         const AddressType = elf_class.AddressType();
         const SegmentType = Segment(elf_class);
         const SectionType = Section(elf_class);
-        const SymbolType = Symbol(elf_class);
+        const SectionDataType = SectionData(elf_class);
+        const SymbolTableType = SymbolTable(elf_class);
+        const RelaTableType = RelaTable(elf_class);
         const elf_class: ElfClass = elf_class;
 
         /// All of the headers in the elf file should have this alignment
-        const elf_header_alignment = switch (elf_class) {
-            .Elf32 => 4,
-            .Elf64 => 8,
-            else => unreachable,
-        };
+        const elf_header_alignment = elf_class.alignment();
 
         endian: ElfEndian,
         abi: ElfAbi,
@@ -93,7 +263,17 @@ pub fn ElfFile(elf_class: ElfClass) type {
 
         segments: ArrayList(SegmentType),
         sections: ArrayList(SectionType),
-        symbols: ArrayList(SymbolType),
+
+        /// Offset into the ELF file where program headers will be stored
+        _phdr_offset: AddressType = 0,
+        /// Offset into the ELF file where the segment data will be stored
+        _segment_data_offset: AddressType = 0,
+        /// Offset into the ELF file where the section data will be stored
+        _section_data_offset: AddressType = 0,
+        /// Offset into the ELF file where section headers will be stored
+        _shdr_offset: AddressType = 0,
+        /// Section header index that contains the .shstrtab section
+        _shstrtab_index: ShIndex = 0,
 
         pub fn init(
             endian: ElfEndian,
@@ -104,8 +284,8 @@ pub fn ElfFile(elf_class: ElfClass) type {
             entry: AddressType,
             flags: u32,
             alloc: *std.mem.Allocator
-        ) @This() {
-            return @This() {
+        ) !@This() {
+            var result = @This() {
                 .endian = endian,
                 .abi = abi,
                 .abi_version = abi_version,
@@ -115,56 +295,145 @@ pub fn ElfFile(elf_class: ElfClass) type {
                 .flags = flags,
                 .segments = ArrayList(SegmentType).init(alloc),
                 .sections = ArrayList(SectionType).init(alloc),
-                .symbols = ArrayList(SymbolType).init(alloc),
             };
+
+            // shdr index 0
+            const index0_sec = Section(elf_class) {
+                .name = 0,
+                .sh_type = ElfShType.Null,
+                .flags = 0,
+                .addr = 0,
+                .link = 0,
+                .info = 0,
+                .alignment = 0,
+                .entsize = 0,
+                .data =  SectionDataType { .None = {}, },
+            };
+            _ = try result.addSection(index0_sec);
+
+            return result;
+        }
+
+        /// add a segment and return its index into the program header table
+        pub fn addSegment(self: *@This(), segment: SegmentType) !u32 {
+            try self.segments.append(segment);
+            return @intCast(u32, self.segments.len-1);
+        }
+
+        /// add a segment and return its index into the section header table
+        pub fn addSection(self: *@This(), section: SectionType) !PhIndex {
+            try self.sections.append(section);
+            return @intCast(PhIndex, self.sections.len-1);
+        }
+
+        fn addShStrTab(self: *@This(), strtab: *StringTable) !ShIndex {
+            // add .shstrtab
+            const name = try strtab.addString(".shstrtab");
+
+            self._shstrtab_index = try self.addStringTable(name, strtab);
+            return self._shstrtab_index;
+        }
+
+        fn addStringTable(self: *@This(), name: StrIndex, strtab: *StringTable) !ShIndex {
+            const header = Section(elf_class) {
+                .name = name,
+                .sh_type = ElfShType.StrTab,
+                .flags = 0,
+                .addr = 0,
+                .link = 0,
+                .info = 0,
+                .alignment = 1,
+                .entsize = 0,
+                .data = SectionDataType { .StringTable = strtab, },
+            };
+            return try self.addSection(header);
+        }
+
+        fn addSymbolTable(
+            self: *@This(),
+            name: StrIndex,
+            symtab: *const SymbolTableType,
+            strtab_index: ShIndex,
+        ) !ShIndex {
+            // TODO: if the symbol table has more than u16 entries need to add
+            // a SHT_SYMTAB_SHNDX section to store the extended indices
+            //
+            const symtab_sh = Section(elf_class) {
+                .name = name,
+                .sh_type = .SymTab,
+                .flags = 0,
+                .addr = 0,
+                .link = strtab_index,
+                .info = symtab._highest_local + 1,
+                .alignment = elf_class.alignment(),
+                .entsize = SymbolTableType.entry_size,
+                .data = SectionDataType { .SymbolTable = symtab, },
+            };
+            const symtab_sh_index = try self.addSection(symtab_sh);
+
+            return symtab_sh_index;
+        }
+
+        fn addRelaTable(
+            self: *@This(),
+            name: StrIndex,
+            rela_table: *const RelaTableType,
+            /// the assosicated symbol table for relocations
+            symtab_index: ShIndex,
+            /// the section to which the relocations apply
+            section_index: ShIndex,
+        ) !ShIndex {
+            const rela_sh = Section(elf_class) {
+                .name = name,
+                .sh_type = .Rela,
+                .flags = 0,
+                .addr = 0,
+                .link = symtab_index,
+                .info = section_index,
+                .alignment = elf_class.alignment(),
+                .entsize = RelaTableType.entry_size,
+                .data = SectionDataType { .RelaTable = rela_table, },
+            };
+            return try self.addSection(rela_sh);
+
         }
 
         /// Offset into the ELF file where the ELF header itself will be stored
         ///
         /// The elf header is always at the start of the file
-        fn elfHeaderOffset(self: @This()) u64 {
+        fn elfHeaderOffset(self: @This()) AddressType {
             return 0;
         }
 
         /// Offset into the ELF file where program headers will be stored
         ///
         /// Program headers are stored after the elf header
-        fn phOffset(self: @This()) u64 {
+        fn calcPhOffset(self: @This()) AddressType {
             if (self.numSegments() == 0) {
                 return 0;
+            } else {
+                return self.elfHeaderOffset() + ElfHeader(elf_class).header_size;
             }
-
-            return (
-                self.elfHeaderOffset()
-                + ElfHeader(elf_class).header_size
-            );
         }
 
-        /// Offset into the ELF file where segments will be stored
-        ///
-        /// Segments are stored after the program headers
-        fn segmentsOffset(self: @This()) u64 {
-            if (self.numSegments() == 0) {
-                return 0;
-            }
-
+        fn calcSegmentDataOffset(self: *@This()) AddressType {
             // find the size of all the program headers and where they end
             const ph_num = self.numSegments();
             const ph_size = ElfProgramHeader(elf_class).header_size;
             const ph_total_size = ph_num * ph_size;
-            const ph_list_end = self.phOffset() + ph_total_size;
+            const ph_list_end = self.calcPhOffset() + ph_total_size;
 
             // find out the necessary alignment for the first segment
-            const segment = self.segments.at(0);
+            const segment = self.segments.span()[0];
             const padding = calcAddrPadding(ph_list_end, segment.vaddr, segment.alignment);
 
             return ph_list_end + padding;
         }
 
-        fn segmentsTotalSize(self: @This()) u64 {
-            var seg_base_offset = self.segmentsOffset();
+        fn segmentDataTotalSize(self: @This()) AddressType {
+            var seg_base_offset = self._segment_data_offset;
             var size: u64 = 0;
-            for (self.segments.toSlice()) |segment| {
+            for (self.segments.span()) |segment| {
                 const alignment = segment.alignment;
                 const seg_offset = seg_base_offset + size;
                 const padding = calcAddrPadding(seg_offset, segment.vaddr, alignment);
@@ -173,91 +442,60 @@ pub fn ElfFile(elf_class: ElfClass) type {
             return size;
         }
 
-        //                        0   1        10  11     18  19
-        const shstrtab_default = "\x00.shstrtab\x00.strtab\x00.symtab\x00";
-        const strtab_default = "\x00";
-        const shstrtab_name_offset = 1;
-        const strtab_name_offset = 11;
-        const symtab_name_offset = 19;
+        fn calcSectionDataOffset(self: *@This()) AddressType {
+            if (self.numSections() == 0) {
+                return 0;
+            }
 
-        const shstrtab_sh_index: u32 = 1;
-        const strtab_sh_index: u32 = 2;
-        const symtab_sh_inndx: u32 = 3;
+            var pos = self._segment_data_offset;
+            pos += self.segmentDataTotalSize();
 
-        fn stringTableSizeCommon(self: @This(), container: var) u64 {
+            const data_alignment = self.sections.span()[0].alignment;
+            const padding = calcPadding(pos, data_alignment);
+            pos += padding;
+
+            return pos;
+        }
+
+        fn sectionDataTotalSize(self: @This()) AddressType {
+            var base_addr = self._section_data_offset;
             var size: u64 = 0;
-
-            for (container.toSlice()) |item| {
-                if (item.name.len == 0) {
-                    continue;
+            for (self.sections.span()) |section| {
+                // ignore segments that don't carry any data of there own
+                switch (section.data) {
+                    .None, .SegmentIndex => continue,
+                    else => {},
                 }
-                // +1 for null terminator
-                size += item.name.len + 1;
-            }
 
+                // calculate how much padding is needed for the section data
+                const alignment = section.alignment;
+                const sec_offset = base_addr + size;
+                const padding = calcPadding(sec_offset, alignment);
+
+                size += section.getDataSize() + padding;
+            }
             return size;
         }
 
-        fn shStrTabSize(self: @This()) u64 {
+        fn calcShOffset(self: @This()) AddressType {
             if (self.numSections() == 0) {
                 return 0;
             }
 
-            var size = shstrtab_default.len;
-            size += self.stringTableSizeCommon(self.sections);
+            var pos = self._section_data_offset;
+            pos += self.sectionDataTotalSize();
 
-            return size;
-        }
-
-        /// Offset into the ELF file for .shstrtab
-        fn shStrTabOffset(self: @This()) u64 {
-            if (self.numSections() == 0) {
-                return 0;
-            }
-
-            var pos = self.segmentsOffset();
-            pos += self.segmentsTotalSize();
+            const shdr_alignment = @This().elf_header_alignment;
+            pos += calcPadding(pos, shdr_alignment);
 
             return pos;
         }
 
-        fn numSymbols(self: @This()) u64 {
-            if (self.symbols.len == 0) {
-                return 0;
-            } else {
-                return self.symbols.len + 1;
-            }
-        }
-
-        /// Size of .strtab
-        fn strTabSize(self: @This()) u64 {
-            if (self.numSymbols() == 0) {
-                return 0;
-            }
-
-            var size = strtab_default.len;
-            size += self.stringTableSizeCommon(self.symbols);
-
-            return size;
-        }
-
-        /// Offset into the ELF file for .strtab
-        fn strTabOffset(self: @This()) u64 {
-            var pos = self.shStrTabOffset();
-            pos += self.shStrTabSize();
-            return pos;
-        }
-
-        /// Size of the .symtab
-        fn symTabSize(self: @This()) u64 {
-            return self.numSymbols() * symtab.ElfSymbolTableEntry(elf_class).entry_size;
-        }
-
-        /// Offset into the ELF file for .symtab
-        fn symTabOffset(self: @This()) u64 {
-            var pos = self.strTabOffset();
-            pos += self.strTabSize();
-            return pos;
+        fn calcOffsets(self: *@This()) void {
+            self._phdr_offset = self.calcPhOffset();
+            self._segment_data_offset = self.calcSegmentDataOffset();
+            self._section_data_offset = self.calcSectionDataOffset();
+            self._shdr_offset = self.calcShOffset();
         }
 
         /// Offset into the ELF file where section headers will be stored
@@ -268,13 +506,7 @@ pub fn ElfFile(elf_class: ElfClass) type {
                 return 0;
             }
 
-            var pos = self.symTabOffset();
-            pos += self.symTabSize();
-
-            // elf headers must match align with machine word size
-            pos += calcPadding(pos, @This().elf_header_alignment);
-
-            return pos;
+            return self._shdr_offset;
         }
 
         /// Calculate the amount of padding needed to reach alignment
@@ -316,17 +548,12 @@ pub fn ElfFile(elf_class: ElfClass) type {
             return num_bytes;
         }
 
-        const PN_XNUM = 0xffff;
-
-        const SHN_LORESERVE = 0xff00;
-        const SHN_XINDEX = 0xffff;
-
         fn numSegments(self: @This()) AddressType {
             if (self.segments.len == 0) {
                 return 0;
             }
 
-            return self.segments.len + 1;
+            return self.segments.len;
         }
 
         /// Value of phnum in the ELF header
@@ -339,31 +566,25 @@ pub fn ElfFile(elf_class: ElfClass) type {
         }
 
         fn hasShStrTab(self: @This()) bool {
-            return self.sections.len > 0;
+            return self.sections.len > 1;
         }
 
         fn hasStrTab(self: @This()) bool {
-            return self.symbols.len > 0;
+            return self.symbols.len > 1;
         }
 
         fn hasSymTab(self: @This()) bool {
-            return self.symbols.len > 0;
-        }
-
-        fn hasShIndex0(self: @This()) bool {
-            return (
-                (self.sections.len > 0)
-                or (self.phNum() == PN_XNUM)
-            );
+            return self.symbols.len > 1;
         }
 
         fn numSections(self: @This()) AddressType {
-            var num_sections = @intCast(AddressType, self.sections.len);
-            num_sections += @bitCast(u1, self.hasShIndex0());
-            num_sections += @bitCast(u1, self.hasShStrTab());
-            num_sections += @bitCast(u1, self.hasStrTab());
-            num_sections += @bitCast(u1, self.hasSymTab());
-            return num_sections;
+            // if the len == 1, then we only have the 0 index which is just a
+            // dummy entry. In that case we don't need any sections
+            if (self.sections.len <= 1) {
+                return 0;
+            } else {
+                return @intCast(AddressType, self.sections.len);
+            }
         }
 
         /// Value of shnum in the ELF header
@@ -377,41 +598,18 @@ pub fn ElfFile(elf_class: ElfClass) type {
             }
         }
 
-        fn shStrTabIndex(self: @This()) u32 {
-            const num_sections = self.numSections();
-            if (num_sections == 0) {
-                return 0;
-            } else {
-                return shstrtab_name_offset;
-            }
-        }
-
-        fn  strTabIndex(self: @This()) u32 {
-            const num_sections = self.numSections();
-            if (num_sections == 0) {
-                return 0;
-            } else {
-                return strtab_name_offset;
-            }
-        }
-
-        fn symbolTableIndex(self: @This()) u32 {
-            const num_sections = self.numSections();
-            if (num_sections == 0) {
-                return 0;
-            } else {
-                return symtab_name_offset;
-            }
+        fn shStrTabShIndex(self: @This()) ShIndex {
+            return self._shstrtab_index;
         }
 
         /// Value of shstrndx in the ELF header
         fn shStrNdx(self: @This()) u16 {
             const num_sections = self.numSections();
-            if (num_sections == 0) {
+            if (num_sections <= 1) {
                 return 0;
             }
 
-            const shstrndx = self.shStrTabIndex();
+            const shstrndx = self.shStrTabShIndex();
             if (shstrndx >= SHN_LORESERVE) {
                 return SHN_XINDEX;
             } else {
@@ -431,10 +629,10 @@ pub fn ElfFile(elf_class: ElfClass) type {
                 .entry = self.entry,
                 .flags = self.flags,
 
-                .phoff = self.phOffset(),
+                .phoff = self._phdr_offset,
                 .phnum = self.phNum(),
 
-                .shoff = self.shOffset(),
+                .shoff = self._shdr_offset,
                 .shnum = self.shNum(),
 
                 .shstrndx = self.shStrNdx(),
@@ -448,27 +646,11 @@ pub fn ElfFile(elf_class: ElfClass) type {
 
         fn addProgramHeaders(self: @This(), serializer: var, cur_offset: u64) !u64 {
             var pos = cur_offset;
-            var seg_offset = self.segmentsOffset();
-
-            // segment header index 0
-            {
-                const ph_header = ElfProgramHeader(elf_class) {
-                    .ph_type = .Null,
-                    .flags = 0,
-                    .offset = 0,
-                    .vaddr = 0,
-                    .paddr = 0,
-                    .filesz = 0,
-                    .memsz = 0,
-                    .align_ = 0,
-                };
-                try serializer.serialize(ph_header);
-                pos += ElfProgramHeader(elf_class).header_size;
-            }
+            var seg_offset = self._segment_data_offset;
 
             // add segment headers
             //
-            for (self.segments.toSlice()) |*segment| {
+            for (self.segments.span()) |*segment| {
                 const padding = calcAddrPadding(seg_offset, segment.vaddr, segment.alignment);
                 const ph_header = ElfProgramHeader(elf_class) {
                     .ph_type = segment.ph_type,
@@ -492,7 +674,7 @@ pub fn ElfFile(elf_class: ElfClass) type {
         fn addSegments(self: @This(), serializer: var, cur_offset: u64) !u64 {
             var pos = cur_offset;
 
-            for (self.segments.toSlice()) |segment| {
+            for (self.segments.span()) |segment| {
                 const alignment = segment.alignment;
                 if (alignment > 1) {
                     // const padding = calcPadding(pos, alignment);
@@ -506,104 +688,69 @@ pub fn ElfFile(elf_class: ElfClass) type {
             return pos;
         }
 
-        fn stringTableCommon(
-            self: @This(),
-            default_strings: []const u8,
-            arrayNames: var,
-            serializer: var,
-            cur_offset: u64
-        ) !u64 {
-            const str_tab_base = cur_offset;
+        fn addSectionData(self: *@This(), serializer: var, cur_offset: u64) !u64 {
             var pos = cur_offset;
 
-            // first byte of string table must be null terminator
-            try serializer.serialize(default_strings);
-            pos += default_strings.len;
-
-            for (arrayNames.toSlice()) |*item| {
-                if (item.name.len == 0) {
-                    item._name_offset = 0;
-                    continue;
-                }
-
-                item._name_offset = @intCast(u32, pos - str_tab_base);
-
-                try serializer.serialize(item.name);
-                pos += item.name.len;
-                pos += try addPadding(serializer, 1);
-            }
-
-            return pos;
-        }
-
-        fn addShStringTable(self: @This(), serializer: var, cur_offset: u64) !u64 {
-            if (!self.hasShStrTab()) {
-                return cur_offset;
-            }
-            assert(cur_offset == self.shStrTabOffset());
-            return self.stringTableCommon(shstrtab_default, self.sections, serializer, cur_offset);
-        }
-
-        fn addSymTabStringTable(self: @This(), serializer: var, cur_offset: u64) !u64 {
-            if (!self.hasStrTab()) {
-                return cur_offset;
-            }
-            assert(cur_offset == self.strTabOffset());
-            return self.stringTableCommon(strtab_default, self.symbols, serializer, cur_offset);
-        }
-
-        fn addSymTab(
-            self: @This(),
-            serializer: var,
-            cur_offset: u64,
-            highest_local: *u32,
-        ) !u64 {
-            if (!self.hasSymTab()) {
-                return cur_offset;
-            }
-
-            const entry_size = symtab.ElfSymbolTableEntry(elf_class).entry_size;
-            var pos = cur_offset;
-
-            assert(pos == self.symTabOffset());
+            // add padding (if necessary) for section data
             {
-                const entry_index0 = symtab.ElfSymbolTableEntry(elf_class) {
-                    .name = 0,
-                    .value = 0,
-                    .size = 0,
-                    .info = 0,
-                    .other = 0,
-                    .shndx = 0,
-                };
-
-                try serializer.serialize(entry_index0);
-                pos += entry_size;
+                const alignment = self.sections.span()[0].alignment;
+                const padding = calcPadding(pos, alignment);
+                pos += try addPadding(serializer, padding);
             }
 
-            highest_local.* = 0;
+            assert(pos == self._section_data_offset);
 
-            for (self.symbols.toSlice()) |symbol, i| {
-                if (symbol.bind == .Local) {
-                    highest_local.* = @intCast(u32, i)+2;
+            // add data for sections
+            for (self.sections.span()) |*section| {
+                switch (section.data) {
+                    .None => {
+                        section._data_offset = 0;
+                        section._data_size = 0;
+                    },
+
+                    .SegmentIndex => |index| {
+                        const segment = self.segments.span()[index];
+                        section._data_offset = segment._segment_offset;
+                        section._data_size = segment.data.len;
+                    },
+
+                    .StringTable, .SymbolTable, .RelaTable, .Data => {
+                        const padding = calcPadding(pos, section.alignment);
+                        pos += try addPadding(serializer, padding);
+
+                        // save the position of this data for later
+                        section._data_offset = pos;
+                        section._data_size = section.getDataSize();
+
+                        switch (section.data) {
+                            .None, .SegmentIndex => unreachable,
+
+                            .Data => |data| {
+                                try serializer.serialize(data);
+                            },
+
+                            .StringTable => |str_tab| {
+                                try serializer.serialize(str_tab.asSlice());
+                            },
+
+                            .SymbolTable => |sym_tab| {
+                                try serializer.serialize(sym_tab.symbol_entries.span());
+                            },
+
+                            .RelaTable => |rela_tab| {
+                                try serializer.serialize(rela_tab.rel_list.span());
+                            },
+                        }
+                        pos += section._data_size;
+                    },
                 }
-                const entry = symtab.ElfSymbolTableEntry(elf_class) {
-                    .name = symbol._name_offset,
-                    .value = symbol.value,
-                    .size = symbol.size,
-                    .info = symtab.stInfo(symbol.type_, symbol.bind),
-                    .other = 0,
-                    .shndx = symbol.shndx,
-                    // visbility: symtab.STV,
-                };
 
-                try serializer.serialize(entry);
-                pos += entry_size;
             }
 
             return pos;
         }
 
-        fn addSectionHeaders(self: @This(), serializer: var, cur_offset: u64, highest_local: u32) !u64 {
+        fn addSectionHeaders(self: @This(), serializer: var, cur_offset: u64) !u64 {
             var pos = cur_offset;
 
             // add padding (if necessary) so that section headers are word aligned
@@ -612,103 +759,42 @@ pub fn ElfFile(elf_class: ElfClass) type {
                 pos += try addPadding(serializer, padding);
             }
 
-            assert(pos == self.shOffset());
+            assert(pos == self._shdr_offset);
 
-            // add sh index 0
-            if (self.hasShIndex0()) {
+            // fill in section header index0
+            {
+                const sh_header0 = &self.sections.span()[0];
+
                 const num_segs = self.numSegments();
-                const ph_num = if (num_segs >= PN_XNUM) num_segs else 0;
+                if (num_segs >= PN_XNUM) {
+                    sh_header0.info = @intCast(u32, num_segs);
+                }
 
                 const num_secs = self.numSections();
-                const sh_size = if (num_secs >= SHN_LORESERVE) num_secs else 0;
+                if (num_secs >= SHN_LORESERVE) {
+                    sh_header0._data_size = num_secs;
+                }
 
-                const shstrtab_ndx = shstrtab_sh_index;
-                const link_str_tab_ndx = if (shstrtab_ndx >= SHN_LORESERVE) shstrtab_ndx else 0;
+                const shstrtab_ndx = self.shStrTabShIndex();
+                if (shstrtab_ndx >= SHN_LORESERVE) {
+                    sh_header0.link = @intCast(u32, shstrtab_ndx);
+                }
 
-                const sh_header = ElfSectionHeader(elf_class) {
-                    .name = 0,
-                    .sh_type = ElfShType.Null,
-                    .flags = 0,
-                    .addr = 0,
-                    .offset = 0,
-                    .size = sh_size,
-                    .link = @intCast(u32, link_str_tab_ndx),
-                    .info = @intCast(u32, ph_num),
-                    .addralign = 0,
-                    .entsize = 0,
-                };
-                try serializer.serialize(sh_header);
-                pos += ElfSectionHeader(elf_class).header_size;
-            }
-
-            // add .shstrtab
-            if (self.hasShStrTab()) {
-                const sh_header = ElfSectionHeader(elf_class) {
-                    .name = self.shStrTabIndex(),
-                    .sh_type = ElfShType.StrTab,
-                    .flags = 0,
-                    .addr = 0,
-                    .offset = self.shStrTabOffset(),
-                    .size = self.shStrTabSize(),
-                    .link = 0,
-                    .info = 0,
-                    .addralign = 1,
-                    .entsize = 0,
-                };
-                try serializer.serialize(sh_header);
-                pos += ElfSectionHeader(elf_class).header_size;
-            }
-
-            // add .strtab
-            if (self.hasStrTab()) {
-                const sh_header = ElfSectionHeader(elf_class) {
-                    .name = self.strTabIndex(),
-                    .sh_type = ElfShType.StrTab,
-                    .flags = 0,
-                    .addr = 0,
-                    .offset = self.strTabOffset(),
-                    .size = self.strTabSize(),
-                    // .link = self.strTabShIndex(),
-                    .link = 0,
-                    .info = 0,
-                    .addralign = 1,
-                    .entsize = 0,
-                };
-                try serializer.serialize(sh_header);
-                pos += ElfSectionHeader(elf_class).header_size;
-            }
-
-            // add .symtab
-            if (self.hasSymTab()) {
-                const sh_header = ElfSectionHeader(elf_class) {
-                    .name = self.symbolTableIndex(),
-                    .sh_type = ElfShType.SymTab,
-                    .flags = 0,
-                    .addr = 0,
-                    .offset = self.symTabOffset(),
-                    .size = self.symTabSize(),
-                    .link = strtab_sh_index,
-                    .info = highest_local,
-                    .addralign = 1,
-                    .entsize = symtab.ElfSymbolTableEntry(elf_class).entry_size,
-                };
-                try serializer.serialize(sh_header);
-                pos += ElfSectionHeader(elf_class).header_size;
             }
 
             // add section headers
-            for (self.sections.toSlice()) |section| {
+            for (self.sections.span()) |section| {
                 const sh_header = ElfSectionHeader(elf_class) {
-                    .name = section._name_offset,
+                    .name = section.name,
                     .sh_type = section.sh_type,
                     .flags = section.flags,
                     .addr = section.addr,
-                    .offset = self.segments.at(section.segment_index)._segment_offset,
-                    .size = section.size,
+                    .offset = section._data_offset,
+                    .size = section._data_size,
                     .link = section.link,
                     .info = section.info,
                     .addralign = section.alignment,
-                    .entsize = 0,
+                    .entsize = section.entsize,
                 };
                 try serializer.serialize(sh_header);
                 pos += ElfSectionHeader(elf_class).header_size;
@@ -718,7 +804,7 @@ pub fn ElfFile(elf_class: ElfClass) type {
         }
 
         /// Write this ELF file to the provided OutStream
-        pub fn write(self: @This(), out_stream: var) !void {
+        pub fn write(self: *@This(), out_stream: var) !void {
             // Layout of how we will write the ELF file:
             //
             // ELF header
@@ -731,21 +817,19 @@ pub fn ElfFile(elf_class: ElfClass) type {
             // ...
             // SegmentsN (self.segment[N].data)
             //
-            // ShStringTable (.shstrtab)
-            // SymtabStringTable (.strtab)
-            // ShSymbolTable (.symtab)
-            //
-            // Shdr[0] (Index0 Shdr SHT_NULL)
-            // Shdr[1] (.shstrtab)
-            // Shdr[2] (.strtab)
-            // Shdr[3] (.symtab)
-            // Shdr[4] (self.sections[0])
+            // section[0].data
             // ...
-            // Shdr[M+5] (self.sections[M])
+            // section[M].data
+            //
+            // Shdr[0] (self.sections[0])
+            // ...
+            // Shdr[M] (self.sections[M])
             //
             // EOF
             var serializer = std.io.Serializer(.Little, .Byte, @TypeOf(out_stream)).init(out_stream);
             var pos: u64 = 0;
+
+            self.calcOffsets();
 
             pos = try self.addElfHeader(&serializer, pos);
 
@@ -755,11 +839,8 @@ pub fn ElfFile(elf_class: ElfClass) type {
             }
 
             if (self.numSections() > 0) {
-                pos = try self.addShStringTable(&serializer, pos);
-                pos = try self.addSymTabStringTable(&serializer, pos);
-                var highest_local: u32 = 0;
-                pos = try self.addSymTab(&serializer, pos, &highest_local);
-                pos = try self.addSectionHeaders(&serializer, pos, highest_local);
+                pos = try self.addSectionData(&serializer, pos);
+                pos = try self.addSectionHeaders(&serializer, pos);
             }
         }
     };

@@ -18,6 +18,7 @@ fn leByte(x: var, n: u8) u8 {
 }
 
 pub fn main() anyerror!void {
+    const out_file_name = "hello_elf";
 
     // msg length
     const msg_len = 0xc;
@@ -28,7 +29,7 @@ pub fn main() anyerror!void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    var elf_file = ElfFile(.Elf64).init(
+    var elf_file = try ElfFile(.Elf64).init(
         .Little,
         .Linux,
         0,
@@ -72,61 +73,21 @@ pub fn main() anyerror!void {
         .flags = PF.R + PF.X,
     };
 
-    try elf_file.segments.append(program_seg);
+    const program_seg_index = try elf_file.addSegment(program_seg);
 
-    const out_file_name = "hello_elf";
-    std.debug.warn("ELF file written to: {}\n", .{out_file_name});
+    {
+        std.debug.warn("ELF file written to: {}\n", .{out_file_name});
 
-    const cwd = std.fs.cwd();
-    var file = try cwd.createFile(out_file_name, .{.mode = 0o744});
-    defer file.close();
+        const cwd = std.fs.cwd();
+        var file = try cwd.createFile(out_file_name, .{.mode = 0o744});
+        defer file.close();
 
-    const file_out_stream = file.outStream();
-    var buf_stream = std.io.bufferedOutStream(file_out_stream);
-    const out_stream = buf_stream.outStream();
-    try elf_file.write(out_stream);
-    try buf_stream.flush();
+        const file_out_stream = file.outStream();
+        var buf_stream = std.io.bufferedOutStream(file_out_stream);
+        const out_stream = buf_stream.outStream();
+        try elf_file.write(out_stream);
+        try buf_stream.flush();
+
+        std.debug.warn("Now try running the file with:\n./{}\n" , .{out_file_name});
+    }
 }
-
-
-// TODO: add test for > 0xffff segments
-// NOTE: Linux rejects ELF files if the program headers don't fit inside
-// one page.
-// {
-//     var i: usize = 0;
-//     while (i <= 0x0047) : (i+=1) {
-//         const base_addr_tmp = 0x20000;
-
-//         const program_seg_tmp = Segment(.Elf64) {
-//             .ph_type = .Load,
-//             .vaddr = base_addr_tmp + i*0x1000,
-//             .paddr = base_addr_tmp + i*0x1000,
-//             .data = program[0..],
-//             .alignment = 0x1000,
-//             .memsz = program.len,
-//             .flags = PF.R + PF.X,
-//             // .flags = PF.R + PF.W + PF.X,
-//         };
-
-//         try elf_file.segments.append(program_seg_tmp);
-//     }
-//     const program_seg_final = Segment(.Elf64) {
-//         .ph_type = .Load,
-//         .vaddr = final_base_addr,
-//         .paddr = final_base_addr,
-//         .data = program[0..],
-//         .alignment = 0x1000,
-//         .memsz = program.len,
-//         .flags = PF.R + PF.X,
-//         // .flags = PF.R + PF.W + PF.X,
-//     };
-//     try elf_file.segments.append(program_seg_final);
-// }
-
-// TODO: add test for > 0xff00 sections
-// {
-//     var i: usize = 0;
-//     while (i <= 0x10000) : (i+=1) {
-//         try elf_file.sections.append(sh_null);
-//     }
-// }

@@ -3,10 +3,15 @@
 
 * https://refspecs.linuxfoundation.org/LSB_4.1.0/LSB-Core-generic/LSB-Core-generic/elf-generic.html
 * https://refspecs.linuxfoundation.org/LSB_4.1.0/LSB-Core-AMD64/LSB-Core-AMD64/book1.html
+* https://refspecs.linuxfoundation.org/
 * http://www.muppetlabs.com/~breadbox/software/ELF.txt
 * http://refspecs.linuxbase.org/elf/elf.pdf
 * https://cirosantilli.com/elf-hello-world
 * `man elf`
+
+* http://michalmalik.github.io/elf-dynamic-segment-struggles
+* https://reverseengineering.stackexchange.com/questions/2539/what-symbol-tables-stay-after-a-strip-in-elf-format
+* https://www.technovelty.org/linux/plt-and-got-the-key-to-code-sharing-and-dynamic-libraries.html (global offset table (GOT) and procedure linkage table (PLT))
 
 ## Sections
 

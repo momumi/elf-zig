@@ -13,7 +13,15 @@ pub const ElfClass = enum (u8) {
         };
     }
 
-    pub fn alignment(self: ElfClass) type {
+    pub fn wordSize(self: ElfClass) comptime_int {
+        return switch (self) {
+            .Elf32 => 4,
+            .Elf64 => 8,
+            else => unreachable,
+        };
+    }
+
+    pub fn alignment(self: ElfClass) comptime_int {
         return switch (self) {
             .Elf32 => 4,
             .Elf64 => 8,
@@ -21,6 +29,11 @@ pub const ElfClass = enum (u8) {
         };
     }
 };
+
+pub const PN_XNUM = 0xffff;
+
+pub const SHN_LORESERVE = 0xff00;
+pub const SHN_XINDEX = 0xffff;
 
 pub const ElfEndian = enum (u8) {
     Little = 1,
@@ -118,6 +131,24 @@ pub const ElfShType = enum (u32) {
     const hi_proc = 0x7FFF_FFFF;
     const lo_user = 0x8000_0000;
     const hi_user = 0xfFFF_FFFF;
+
+// SHT_NULL 	0
+// SHT_PROGBITS 	1
+// SHT_SYMTAB 	2
+// SHT_STRTAB 	3
+// SHT_RELA 	4
+// SHT_HASH 	5
+// SHT_DYNAMIC 	6
+// SHT_NOTE 	7
+// SHT_NOBITS 	8
+// SHT_REL 	9
+// SHT_SHLIB 	10
+// SHT_DYNSYM 	11
+// SHT_INIT_ARRAY 	14
+// SHT_FINI_ARRAY 	15
+// SHT_PREINIT_ARRAY 	16
+// SHT_GROUP 	17
+// SHT_SYMTAB_SHNDX 	18
 
     /// Section header table entry unused
     Null = 0x0,
